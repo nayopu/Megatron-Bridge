@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import import_module
-from typing import Any
+from typing import Any, cast
 
 
 @dataclass(frozen=True)
@@ -82,3 +82,18 @@ def resolve_model_collate(processor_type: str) -> Callable[..., dict[str, Any]]:
     if not callable(collate):
         raise TypeError(f"Registered collator {spec.module_name}.{spec.symbol_name} is not callable.")
     return collate
+
+
+def resolve_collate_target(collate_target: str) -> Callable[..., dict[str, Any]]:
+    """Resolve a config-declared collator through Bridge's target allowlist.
+
+    Configs remain declarative by storing an import target rather than a Python
+    callable. Applications may register their package prefix from trusted Python
+    code before loading a config.
+    """
+    from megatron.bridge.utils.instantiate_utils import instantiate
+
+    collate = instantiate({"_target_": collate_target, "_call_": False})
+    if not callable(collate):
+        raise TypeError(f"Collate target '{collate_target}' did not resolve to a callable.")
+    return cast(Callable[..., dict[str, Any]], collate)

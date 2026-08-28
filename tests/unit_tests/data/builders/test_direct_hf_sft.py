@@ -20,6 +20,7 @@ from megatron.bridge.data.builders.direct_hf_sft import (
     load_direct_hf_sft_processor,
     select_direct_hf_sft_collate,
 )
+from megatron.bridge.data.collators.sft import text_chat_collate_fn
 from megatron.bridge.data.sources.hf import resolve_hf_dataset_source
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.utils.omegaconf_utils import process_config_with_overrides
@@ -98,6 +99,33 @@ def test_config_defaults_to_cyclic_sampler():
     )
 
     assert config.dataloader_type == "cyclic"
+
+
+def test_builder_resolves_configured_collate_target():
+    config = DirectHFSFTDatasetConfig(
+        seq_length=16,
+        source=HFDatasetSourceConfig(path_or_dataset="org/chat"),
+        collate_target="megatron.bridge.data.collators.sft.text_chat_collate_fn",
+        do_validation=False,
+        do_test=False,
+    )
+
+    builder = DirectHFSFTDatasetBuilder(config)
+
+    assert builder._collate_impl is text_chat_collate_fn
+
+
+def test_builder_rejects_python_and_config_collate_overrides():
+    config = DirectHFSFTDatasetConfig(
+        seq_length=16,
+        source=HFDatasetSourceConfig(path_or_dataset="org/chat"),
+        collate_target="megatron.bridge.data.collators.sft.text_chat_collate_fn",
+        do_validation=False,
+        do_test=False,
+    )
+
+    with pytest.raises(ValueError, match="either collate_impl or collate_target"):
+        DirectHFSFTDatasetBuilder(config, collate_impl=text_chat_collate_fn)
 
 
 def test_config_validates_source_and_padding():
@@ -494,6 +522,7 @@ def test_direct_hf_sft_config_round_trip_is_declarative():
         ),
         do_test=False,
         enable_in_batch_packing=True,
+        collate_target="megatron.bridge.data.collators.sft.text_chat_collate_fn",
     )
 
     serialized = ConfigContainer._convert_value_to_dict(config)
@@ -503,6 +532,7 @@ def test_direct_hf_sft_config_round_trip_is_declarative():
     assert restored.preprocessing.loss_mode == "assistant"
     assert restored.source.load_kwargs == config.source.load_kwargs
     assert restored.dataloader_type == "cyclic"
+    assert restored.collate_target == "megatron.bridge.data.collators.sft.text_chat_collate_fn"
     assert "collate_impl" not in serialized
     assert "processor" not in serialized
     assert "tokenizer" not in serialized

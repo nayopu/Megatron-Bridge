@@ -14,6 +14,7 @@
 
 """Serializable config and runtime builder for synthetic VLM conversations."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -22,6 +23,7 @@ from PIL import Image
 from transformers import AutoProcessor
 
 from megatron.bridge.data.base import DataloaderConfig, DatasetBuildContext
+from megatron.bridge.data.collators.registry import resolve_collate_target
 from megatron.bridge.data.datasets.direct_sft import DirectSFTDataset
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 
@@ -41,7 +43,11 @@ _MOCK_RESPONSE_VOCABULARY = (
 
 @dataclass(kw_only=True)
 class MockVLMSFTDatasetConfig(DataloaderConfig):
-    """Serializable settings for synthetic conversation-style VLM data."""
+    """Serializable settings for synthetic conversation-style VLM data.
+
+    ``collate_target`` optionally replaces the processor-selected collator with
+    an allowlisted callable import target.
+    """
 
     seq_length: int
     hf_processor_path: str
@@ -57,6 +63,7 @@ class MockVLMSFTDatasetConfig(DataloaderConfig):
     pad_to_max_length: bool = False
     pad_to_multiple_of: int = 128
     in_batch_packing_pad_to_multiple_of: int = 1
+    collate_target: str | None = None
 
     def validate(self) -> None:
         """Validate synthetic data settings."""
@@ -76,6 +83,10 @@ class MockVLMSFTDatasetConfig(DataloaderConfig):
             raise ValueError("pad_to_multiple_of must be greater than 0.")
         if self.in_batch_packing_pad_to_multiple_of <= 0:
             raise ValueError("in_batch_packing_pad_to_multiple_of must be greater than 0.")
+        if self.collate_target is not None and (
+            not isinstance(self.collate_target, str) or not self.collate_target.strip()
+        ):
+            raise ValueError("collate_target must be a non-empty import target when set.")
 
     def finalize(self) -> None:
         """Finalize dataloader settings and validate this config."""
@@ -121,6 +132,8 @@ def build_mock_vlm_sft_split(
     base_examples: list[dict[str, Any]],
     target_length: int,
     processor: Any,
+    *,
+    collate_impl: Callable[..., dict[str, Any]] | None = None,
 ) -> DirectSFTDataset | None:
     """Build one requested synthetic VLM split."""
     if target_length <= 0:
@@ -129,7 +142,7 @@ def build_mock_vlm_sft_split(
         base_examples=base_examples,
         target_length=target_length,
         processor=processor,
-        collate_impl=None,
+        collate_impl=collate_impl,
         sequence_length=config.seq_length,
         pad_to_max_length=config.pad_to_max_length,
         pad_to_multiple_of=config.pad_to_multiple_of,
@@ -145,6 +158,9 @@ class MockVLMSFTDatasetBuilder:
     def __init__(self, config: MockVLMSFTDatasetConfig) -> None:
         config.validate()
         self.config = config
+        self._collate_impl = (
+            resolve_collate_target(config.collate_target) if config.collate_target is not None else None
+        )
 
     def build(
         self,
@@ -160,9 +176,27 @@ class MockVLMSFTDatasetBuilder:
         )
         base_examples = make_mock_vlm_examples(self.config)
         return (
-            build_mock_vlm_sft_split(self.config, base_examples, context.train_samples, processor),
-            build_mock_vlm_sft_split(self.config, base_examples, context.valid_samples, processor),
-            build_mock_vlm_sft_split(self.config, base_examples, context.test_samples, processor),
+            build_mock_vlm_sft_split(
+                self.config,
+                base_examples,
+                context.train_samples,
+                processor,
+                collate_impl=self._collate_impl,
+            ),
+            build_mock_vlm_sft_split(
+                self.config,
+                base_examples,
+                context.valid_samples,
+                processor,
+                collate_impl=self._collate_impl,
+            ),
+            build_mock_vlm_sft_split(
+                self.config,
+                base_examples,
+                context.test_samples,
+                processor,
+                collate_impl=self._collate_impl,
+            ),
         )
 
 

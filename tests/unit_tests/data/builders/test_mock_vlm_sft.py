@@ -20,6 +20,7 @@ from megatron.training.config.instantiate_utils import instantiate
 from megatron.bridge.data import DatasetBuildContext
 from megatron.bridge.data.builders import MockVLMSFTDatasetBuilder, MockVLMSFTDatasetConfig
 from megatron.bridge.data.builders import mock_vlm_sft as builder_module
+from megatron.bridge.data.collators.sft import text_chat_collate_fn
 from megatron.bridge.training.config import ConfigContainer
 
 
@@ -35,7 +36,11 @@ def _config(**overrides) -> MockVLMSFTDatasetConfig:
 
 
 def test_mock_config_round_trip_contains_no_runtime_processor():
-    config = _config(enable_in_batch_packing=True, defer_in_batch_packing_to_step=True)
+    config = _config(
+        enable_in_batch_packing=True,
+        defer_in_batch_packing_to_step=True,
+        collate_target="megatron.bridge.data.collators.sft.text_chat_collate_fn",
+    )
 
     serialized = ConfigContainer._convert_value_to_dict(config)
     restored = instantiate(serialized)
@@ -43,6 +48,7 @@ def test_mock_config_round_trip_contains_no_runtime_processor():
     assert isinstance(restored, MockVLMSFTDatasetConfig)
     assert restored.enable_in_batch_packing is True
     assert restored.defer_in_batch_packing_to_step is True
+    assert restored.collate_target == "megatron.bridge.data.collators.sft.text_chat_collate_fn"
     assert "processor" not in serialized
 
 
@@ -101,6 +107,27 @@ def test_builder_loads_processor_at_runtime_and_builds_requested_splits(monkeypa
         assert kwargs["pad_to_max_length"] is True
         assert kwargs["pad_to_multiple_of"] == 64
         assert kwargs["in_batch_packing_pad_to_multiple_of"] == 8
+
+
+def test_mock_builder_forwards_configured_collate_target(monkeypatch: pytest.MonkeyPatch):
+    config = _config(collate_target="megatron.bridge.data.collators.sft.text_chat_collate_fn")
+    captured_kwargs = []
+
+    class CapturingDirectSFTDataset:
+        def __init__(self, **kwargs):
+            captured_kwargs.append(kwargs)
+            self.target_length = kwargs["target_length"]
+
+        def __len__(self):
+            return self.target_length
+
+    monkeypatch.setattr(builder_module.AutoProcessor, "from_pretrained", lambda *args, **kwargs: object())
+    monkeypatch.setattr(builder_module, "is_safe_repo", lambda **_: False)
+    monkeypatch.setattr(builder_module, "DirectSFTDataset", CapturingDirectSFTDataset)
+
+    MockVLMSFTDatasetBuilder(config).build(DatasetBuildContext(train_samples=1, valid_samples=0, test_samples=0))
+
+    assert captured_kwargs[0]["collate_impl"] is text_chat_collate_fn
 
 
 @pytest.mark.parametrize(

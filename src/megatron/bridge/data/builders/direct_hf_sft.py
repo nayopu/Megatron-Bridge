@@ -25,6 +25,7 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from transformers import AutoProcessor, AutoTokenizer
 
 from megatron.bridge.data.base import DataloaderConfig, DatasetBuildContext, validate_declarative_mapping
+from megatron.bridge.data.collators.registry import resolve_collate_target
 from megatron.bridge.data.collators.sft import text_chat_collate_fn, text_prompt_completion_collate_fn
 from megatron.bridge.data.conversation_processing import get_processor_tokenizer, is_text_only_chat_example
 from megatron.bridge.data.datasets.direct_sft import DirectSFTDataset
@@ -69,7 +70,8 @@ class DirectHFSFTDatasetConfig(DataloaderConfig):
 
     Chat preprocessing is the compatibility default for multimodal and
     conversation sources. New text recipes should select chat or paired-text
-    preprocessing explicitly.
+    preprocessing explicitly. ``collate_target`` optionally replaces the
+    processor-selected collator with an allowlisted callable import target.
 
     ``source`` takes one source or a list of them. A list blends the training
     rows across the sources, weighted by ``source_weights``.
@@ -93,6 +95,7 @@ class DirectHFSFTDatasetConfig(DataloaderConfig):
     pad_to_max_length: bool = False
     pad_to_multiple_of: int = 128
     in_batch_packing_pad_to_multiple_of: int = 1
+    collate_target: str | None = None
 
     def validate(self) -> None:
         """Validate declarative source and dataset settings."""
@@ -121,6 +124,10 @@ class DirectHFSFTDatasetConfig(DataloaderConfig):
             raise ValueError("pad_to_multiple_of must be greater than 0.")
         if self.in_batch_packing_pad_to_multiple_of <= 0:
             raise ValueError("in_batch_packing_pad_to_multiple_of must be greater than 0.")
+        if self.collate_target is not None and (
+            not isinstance(self.collate_target, str) or not self.collate_target.strip()
+        ):
+            raise ValueError("collate_target must be a non-empty import target when set.")
 
     @property
     def training_sources(self) -> list[HFDatasetSourceConfig]:
@@ -345,7 +352,11 @@ class DirectHFSFTDatasetBuilder:
         collate_impl: CollateFunction | None = None,
     ) -> None:
         config.validate()
+        if collate_impl is not None and config.collate_target is not None:
+            raise ValueError("Set either collate_impl or collate_target, not both.")
         self.config = config
+        if collate_impl is None and config.collate_target is not None:
+            collate_impl = resolve_collate_target(config.collate_target)
         self._collate_impl = collate_impl
 
     def build(
