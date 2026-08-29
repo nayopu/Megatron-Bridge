@@ -23,11 +23,11 @@ from transformers import AutoProcessor, AutoTokenizer, Qwen3VLProcessor
 
 from megatron.bridge.data.base import DataloaderConfig, DatasetBuildContext, validate_declarative_mapping
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
-from megatron.bridge.utils.instantiate_utils import _resolve_target
+from megatron.bridge.utils.instantiate_utils import instantiate
 
 
-def _validate_hf_path(path: str, *, field_name: str) -> None:
-    if not isinstance(path, str) or not path.strip():
+def _validate_non_empty_string(value: str, *, field_name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string.")
 
 
@@ -50,7 +50,7 @@ class HFEnergonTaskEncoderConfig:
 
     def validate(self) -> None:
         """Validate generic Hugging Face task-encoder settings."""
-        _validate_hf_path(self.hf_processor_path, field_name="hf_processor_path")
+        _validate_non_empty_string(self.hf_processor_path, field_name="hf_processor_path")
         if self.hf_processor_revision is not None and (
             not isinstance(self.hf_processor_revision, str) or not self.hf_processor_revision.strip()
         ):
@@ -83,7 +83,7 @@ class QwenVLEnergonTaskEncoderConfig:
 
     def validate(self) -> None:
         """Validate Qwen-VL task-encoder settings."""
-        _validate_hf_path(self.hf_processor_path, field_name="hf_processor_path")
+        _validate_non_empty_string(self.hf_processor_path, field_name="hf_processor_path")
         if self.hf_processor_revision is not None and (
             not isinstance(self.hf_processor_revision, str) or not self.hf_processor_revision.strip()
         ):
@@ -121,7 +121,7 @@ class NemotronOmniEnergonTaskEncoderConfig:
 
     def validate(self) -> None:
         """Validate Nemotron Omni task-encoder settings."""
-        _validate_hf_path(self.hf_processor_path, field_name="hf_processor_path")
+        _validate_non_empty_string(self.hf_processor_path, field_name="hf_processor_path")
         if self.max_audio_duration <= 0:
             raise ValueError("max_audio_duration must be greater than 0.")
         for field_name in ("num_mel_bins", "temporal_patch_size", "video_nframes", "patch_dim"):
@@ -136,18 +136,6 @@ class NemotronOmniEnergonTaskEncoderConfig:
 EnergonTaskEncoderConfig = (
     HFEnergonTaskEncoderConfig | QwenVLEnergonTaskEncoderConfig | NemotronOmniEnergonTaskEncoderConfig
 )
-
-
-@dataclass(kw_only=True)
-class EnergonTaskEncoderFactoryConfig:
-    """Declarative factory for task encoders not implemented by Bridge."""
-
-    target: str
-    """Fully qualified factory callable invoked with the dataset config."""
-
-    def validate(self) -> None:
-        """Validate the task-encoder factory target."""
-        _validate_hf_path(self.target, field_name="task_encoder_factory.target")
 
 
 @dataclass(kw_only=True)
@@ -166,7 +154,7 @@ class EnergonDatasetConfig(DataloaderConfig):
     max_samples_per_sequence: int | None = None
     packing_buffer_size: int | None = None
     dataset_kwargs: dict[str, Any] = field(default_factory=dict)
-    task_encoder_factory: EnergonTaskEncoderFactoryConfig | None = None
+    task_encoder_target: str | None = None
     enable_in_batch_packing: bool = False
     defer_in_batch_packing_to_step: bool = False
     pad_to_max_length: bool = False
@@ -217,10 +205,8 @@ class EnergonDatasetConfig(DataloaderConfig):
         if self.packing_buffer_size is not None and not isinstance(self.task_encoder, QwenVLEnergonTaskEncoderConfig):
             raise ValueError("Energon native sequence packing currently supports only QwenVLEnergonTaskEncoderConfig.")
         validate_declarative_mapping(self.dataset_kwargs, field_name="dataset_kwargs")
-        if self.task_encoder_factory is not None:
-            if not isinstance(self.task_encoder_factory, EnergonTaskEncoderFactoryConfig):
-                raise TypeError("task_encoder_factory must be an EnergonTaskEncoderFactoryConfig when set.")
-            self.task_encoder_factory.validate()
+        if self.task_encoder_target is not None:
+            _validate_non_empty_string(self.task_encoder_target, field_name="task_encoder_target")
         reserved_dataset_kwargs = {
             "batch_size",
             "max_samples_per_sequence",
@@ -243,13 +229,17 @@ class EnergonDatasetConfig(DataloaderConfig):
         self.validate()
 
 
+def _build_custom_task_encoder(config: EnergonDatasetConfig, **runtime_objects: Any) -> Any:
+    if config.task_encoder_target is None:
+        raise ValueError("task_encoder_target must be set to build a custom task encoder.")
+    task_encoder_cls = instantiate({"_target_": config.task_encoder_target, "_call_": False})
+    return task_encoder_cls.from_energon_config(dataset_config=config, **runtime_objects)
+
+
 def build_energon_task_encoder(config: EnergonDatasetConfig) -> Any:
     """Construct the configured Energon task encoder at runtime."""
     task_config = config.task_encoder
     task_config.validate()
-    if config.task_encoder_factory is not None:
-        factory = _resolve_target(config.task_encoder_factory.target, "task_encoder_factory.target")
-        return factory(config)
 
     effective_packing = config.enable_in_batch_packing and not config.defer_in_batch_packing_to_step
     enable_energon_packing = config.packing_buffer_size is not None
@@ -268,6 +258,8 @@ def build_energon_task_encoder(config: EnergonDatasetConfig) -> Any:
             revision=task_config.hf_processor_revision,
             trust_remote_code=trust_remote_code,
         )
+        if config.task_encoder_target is not None:
+            return _build_custom_task_encoder(config, processor=processor)
         return HFTaskEncoder(
             processor=processor,
             seq_length=config.seq_length,
@@ -293,6 +285,12 @@ def build_energon_task_encoder(config: EnergonDatasetConfig) -> Any:
             revision=task_config.hf_processor_revision,
             trust_remote_code=trust_remote_code,
         )
+        if config.task_encoder_target is not None:
+            return _build_custom_task_encoder(
+                config,
+                tokenizer=tokenizer,
+                image_processor=image_processor,
+            )
         return QwenVLTaskEncoder(
             tokenizer=tokenizer,
             image_processor=image_processor,
@@ -318,6 +316,8 @@ def build_energon_task_encoder(config: EnergonDatasetConfig) -> Any:
         task_config.hf_processor_path,
         trust_remote_code=trust_remote_code,
     )
+    if config.task_encoder_target is not None:
+        return _build_custom_task_encoder(config, processor=processor)
     return NemotronOmniTaskEncoder(
         processor=processor,
         seq_length=config.seq_length,
