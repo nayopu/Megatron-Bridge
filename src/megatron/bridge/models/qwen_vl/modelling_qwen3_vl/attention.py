@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from copy import copy
+
 from einops import rearrange
 from megatron.core.transformer.attention import (
     HAVE_FA3,
@@ -27,6 +29,41 @@ from megatron.core.transformer.attention import (
 from torch import Tensor
 
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.rope import apply_rotary_pos_emb_absolute
+
+
+def _get_core_attention_packed_seq_params(
+    packed_seq_params: PackedSeqParams | None,
+) -> PackedSeqParams | None:
+    """Use physical THD boundaries for Qwen core attention.
+
+    Qwen's hybrid layers need both logical and physical boundaries outside
+    attention, but TE attention kernels consume the full physical token stream.
+    Passing only the physical boundaries avoids relying on TE's padded-layout
+    inference, which ignores a difference at the final cumulative offset.
+
+    Ported from NVIDIA-NeMo/Megatron-Bridge#5630 onto the pinned Bridge tree.
+
+    Args:
+        packed_seq_params: Packed metadata shared by the Qwen decoder.
+
+    Returns:
+        A shallow copy using physical q/kv boundaries for core attention, or
+        the original value when no padded layout is present.
+    """
+    if packed_seq_params is None or packed_seq_params.cu_seqlens_q_padded is None:
+        return packed_seq_params
+
+    core_attention_params = copy(packed_seq_params)
+    core_attention_params.cu_seqlens_q = packed_seq_params.cu_seqlens_q_padded
+    core_attention_params.cu_seqlens_kv = (
+        packed_seq_params.cu_seqlens_kv_padded
+        if packed_seq_params.cu_seqlens_kv_padded is not None
+        else packed_seq_params.cu_seqlens_q_padded
+    )
+    core_attention_params.cu_seqlens_q_padded = None
+    core_attention_params.cu_seqlens_kv_padded = None
+    core_attention_params.pad_between_seqs = False
+    return core_attention_params
 
 
 class Qwen3VLSelfAttention(SelfAttention):
@@ -217,6 +254,7 @@ class Qwen3VLSelfAttention(SelfAttention):
         # ==================================
 
         nvtx_range_push(suffix="core_attention")
+        core_attention_packed_seq_params = _get_core_attention_packed_seq_params(packed_seq_params)
         if self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
                 query,
@@ -225,7 +263,7 @@ class Qwen3VLSelfAttention(SelfAttention):
                 attention_mask,
                 attn_mask_type=attn_mask_type,
                 attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
+                packed_seq_params=core_attention_packed_seq_params,
             )
         else:
             if inference_context is None or inference_context.is_static_batching():
@@ -237,7 +275,7 @@ class Qwen3VLSelfAttention(SelfAttention):
                     attention_mask,
                     attn_mask_type=attn_mask_type,
                     attention_bias=attention_bias,
-                    packed_seq_params=packed_seq_params,
+                    packed_seq_params=core_attention_packed_seq_params,
                 )
 
             else:
