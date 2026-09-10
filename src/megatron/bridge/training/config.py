@@ -633,12 +633,6 @@ class CheckpointConfig(MTrainCheckpointConfig):
                     f"Please set checkpoint.load to the base checkpoint directory."
                 )
 
-        if self.dist_ckpt_optim_fully_reshardable:
-            assert not self.distrib_optim_fully_reshardable_mem_efficient, (
-                "distrib_optim_fully_reshardable_mem_efficient requires use_gloo_process_groups"
-            )
-
-
 @dataclass(kw_only=True)
 class LoggerConfig(MTrainLoggerConfig):
     """Configuration settings for logging, including TensorBoard and WandB."""
@@ -1158,6 +1152,12 @@ class ConfigContainer(Container):
                 "Gloo process groups are not supported when use_decentralized_pg=True. "
                 "Decentralized process groups only support NCCL backend."
             )
+
+        if self.checkpoint.dist_ckpt_optim_fully_reshardable:
+            assert (
+                not self.checkpoint.distrib_optim_fully_reshardable_mem_efficient
+                or self.dist.use_gloo_process_groups
+            ), "distrib_optim_fully_reshardable_mem_efficient requires dist.use_gloo_process_groups=True"
 
         # Make sure all functionality that requires Gloo process groups is disabled.
         if not self.dist.use_gloo_process_groups:
