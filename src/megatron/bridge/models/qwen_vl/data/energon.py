@@ -41,7 +41,7 @@ from megatron.bridge.data.energon.task_encoder_utils import (
 from megatron.bridge.data.packing.algorithms import first_fit_decreasing
 from megatron.bridge.models.qwen_vl.data.collate_fn import (
     QwenVLPreparedSequence,
-    build_qwen_vl_packed_batch,
+    build_qwen_vl_packed_batch_from_groups,
     prepare_qwen_vl_sequence,
     qwen2_5_collate_fn,
 )
@@ -460,8 +460,8 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
 
         Expected input format:
             Either normalized ``QwenVLTaskSample`` objects whose ``example``
-            fields follow the HF VLM collate schema, or one physical
-            ``QwenVLPackedTaskSample`` selected by Energon native packing.
+            fields follow the HF VLM collate schema, or packed sample groups
+            selected by Energon native packing.
 
         Output format:
             Returns ``QwenVLTaskBatch`` carrying the same tensors as
@@ -469,22 +469,29 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
             be padded to ``seq_length`` while retaining separate real and
             physical THD boundaries.
         """
-        if samples and isinstance(samples[0], QwenVLPackedTaskSample):
-            if len(samples) != 1 or not all(isinstance(sample, QwenVLPackedTaskSample) for sample in samples):
-                raise ValueError("Energon native sequence packing requires physical micro_batch_size=1.")
-            packed_sample = samples[0]
-            source_samples = packed_sample.samples
+        is_native_packed = bool(samples) and isinstance(samples[0], QwenVLPackedTaskSample)
+        if is_native_packed:
+            if not all(isinstance(sample, QwenVLPackedTaskSample) for sample in samples):
+                raise TypeError("Qwen-VL batches cannot mix packed and unpacked Energon samples.")
+            packed_groups = [packed_sample.samples for packed_sample in samples]
+            source_samples = [sample for group in packed_groups for sample in group]
             if any(sample.prepared_sequence is None for sample in source_samples):
                 raise ValueError("Packed Qwen-VL samples must contain prepared sequences.")
-            packed_length = sum(
-                _aligned_sequence_length(sample.prepared_sequence, self.in_batch_packing_pad_to_multiple_of)
-                for sample in source_samples
-                if sample.prepared_sequence is not None
-            )
-            if packed_length > self.seq_length:
-                raise ValueError(f"Packed Qwen-VL group length {packed_length} exceeds seq_length={self.seq_length}.")
-            collated = build_qwen_vl_packed_batch(
-                [sample.prepared_sequence for sample in source_samples if sample.prepared_sequence is not None],
+            for group in packed_groups:
+                packed_length = sum(
+                    _aligned_sequence_length(sample.prepared_sequence, self.in_batch_packing_pad_to_multiple_of)
+                    for sample in group
+                    if sample.prepared_sequence is not None
+                )
+                if packed_length > self.seq_length:
+                    raise ValueError(
+                        f"Packed Qwen-VL group length {packed_length} exceeds seq_length={self.seq_length}."
+                    )
+            collated = build_qwen_vl_packed_batch_from_groups(
+                [
+                    [sample.prepared_sequence for sample in group if sample.prepared_sequence is not None]
+                    for group in packed_groups
+                ],
                 sequence_length=self.seq_length,
                 pad_to_multiple_of=self.in_batch_packing_pad_to_multiple_of,
                 pad_to_max_length=self.pad_to_max_length,
@@ -498,7 +505,7 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
             examples = [sample.example for sample in source_samples if sample.example is not None]
             collated = self.collate_fn(examples)
 
-        if collated["input_ids"].shape[1] > self.seq_len:
+        if not is_native_packed and collated["input_ids"].shape[1] > self.seq_len:
             logging.warning("max sequence length larger than passed parameter")
 
         keys = [sample.__key__ for sample in source_samples]

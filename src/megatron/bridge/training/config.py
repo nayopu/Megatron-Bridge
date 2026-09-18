@@ -1326,8 +1326,6 @@ class ConfigContainer(Container):
             )
 
         if enable_energon_packing:
-            if self.train.micro_batch_size != 1:
-                raise ValueError("Energon native sequence packing requires train.micro_batch_size=1.")
             if not self.model.calculate_per_token_loss:
                 raise ValueError("Energon native sequence packing requires model.calculate_per_token_loss=True.")
             if self.ddp.average_in_collective:

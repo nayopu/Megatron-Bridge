@@ -189,7 +189,6 @@ def test_qwen_factory_enables_native_energon_packing_from_buffer_size(monkeypatc
     [
         ({"enable_in_batch_packing": True}, "select exactly one packing owner"),
         ({"defer_in_batch_packing_to_step": True}, "canonical vlm_step"),
-        ({"micro_batch_size": 2}, "micro_batch_size=1"),
     ],
 )
 def test_native_energon_packing_rejects_incompatible_modes(overrides: dict, error: str):
@@ -202,6 +201,12 @@ def test_native_energon_packing_rejects_incompatible_modes(overrides: dict, erro
 
     with pytest.raises(ValueError, match=error):
         config.validate()
+
+
+def test_native_energon_packing_allows_multiple_packed_slots():
+    config = _qwen_config(micro_batch_size=2, packing_buffer_size=32)
+
+    config.validate()
 
 
 def test_native_energon_packing_rejects_unsupported_task_encoder():
