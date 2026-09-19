@@ -19,6 +19,7 @@ import torch
 
 from megatron.bridge.data.packing.in_batch import (
     build_mcore_thd_sequence_batch_from_rows,
+    merge_mcore_thd_sequence_batches,
     pack_right_padded_sequence_batch_to_mcore_thd,
 )
 
@@ -155,6 +156,27 @@ class TestPackBatchSequences:
         assert packed["pad_between_seqs"] is True
         assert packed["max_seqlen_q"].item() == 5
         assert packed["total_tokens"] == 8
+
+    def test_merge_packed_batches_preserves_each_bin_boundary(self):
+        first_bin = build_mcore_thd_sequence_batch_from_rows(
+            [
+                {"input_ids": torch.tensor([1, 2, 3]), "position_ids": torch.arange(3)},
+                {"input_ids": torch.tensor([4, 5]), "position_ids": torch.arange(2)},
+            ],
+            pad_to_multiple_of=4,
+        )
+        second_bin = build_mcore_thd_sequence_batch_from_rows(
+            [{"input_ids": torch.tensor([6, 7, 8, 9]), "position_ids": torch.arange(4)}],
+            pad_to_multiple_of=4,
+        )
+
+        merged = merge_mcore_thd_sequence_batches([first_bin, second_bin])
+
+        assert merged["input_ids"].tolist() == [[1, 2, 3, 0, 4, 5, 0, 0, 6, 7, 8, 9]]
+        assert merged["cu_seqlens_q"].tolist() == [0, 3, 5, 9]
+        assert merged["cu_seqlens_q_padded"].tolist() == [0, 4, 8, 12]
+        assert merged["max_seqlen_q"].item() == 4
+        assert merged["total_tokens"] == 12
 
     def test_fixed_width_direct_rows_reject_aggregate_over_sequence_length(self):
         """Fixed-width packing rejects rows whose physical aggregate cannot fit."""

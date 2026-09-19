@@ -31,7 +31,10 @@ from megatron.bridge.data.conversation_processing import (
     resolve_chat_template_kwargs,
 )
 from megatron.bridge.data.datasets.utils import IGNORE_INDEX
-from megatron.bridge.data.packing.in_batch import build_mcore_thd_sequence_batch_from_rows
+from megatron.bridge.data.packing.in_batch import (
+    build_mcore_thd_sequence_batch_from_rows,
+    merge_mcore_thd_sequence_batches,
+)
 from megatron.bridge.data.token_utils import extract_skipped_token_ids
 from megatron.bridge.training.utils.visual_inputs import GenericVisualInputs
 
@@ -266,80 +269,30 @@ def build_qwen_vl_packed_batch(
         pad_to_multiple_of=pad_to_multiple_of,
         pad_to_max_length=pad_to_max_length,
     )
-    visual_values: dict[str, list[torch.Tensor]] = {key: [] for key in QWEN_VISUAL_KEYS}
-    for sequence in sequences:
-        for key, value in sequence.visual_values.items():
-            visual_values[key].append(value)
-    packed_batch["visual_inputs"] = GenericVisualInputs(
-        **{key: torch.cat(values, dim=0) for key, values in visual_values.items() if values}
-    )
+    packed_batch["visual_inputs"] = merge_qwen_vl_visual_inputs([sequence.visual_values for sequence in sequences])
     return packed_batch
 
 
-def build_qwen_vl_packed_batch_from_groups(
-    sequence_groups: list[list[QwenVLPreparedSequence]],
-    *,
-    sequence_length: int,
-    pad_to_multiple_of: int,
-    pad_to_max_length: bool = False,
-) -> dict[str, Any]:
-    """Build one THD row from independently selected native-packing bins.
-
-    Each group is constrained and, when requested, final-padded to
-    ``sequence_length`` before all groups are flattened into one physical row.
-    This preserves the meaning of an Energon native-packing micro batch: one
-    selected bin per micro-batch slot.
-    """
-    if not sequence_groups or any(not group for group in sequence_groups):
-        raise ValueError("Native packed Qwen-VL batches require non-empty sequence groups.")
-
-    group_batches = [
-        build_qwen_vl_packed_batch(
-            group,
-            sequence_length=sequence_length,
-            pad_to_multiple_of=pad_to_multiple_of,
-            pad_to_max_length=pad_to_max_length,
-        )
-        for group in sequence_groups
-    ]
-    if len(group_batches) == 1:
-        return group_batches[0]
-
-    total_tokens = [int(batch["total_tokens"]) for batch in group_batches]
-    merged: dict[str, Any] = {
-        key: torch.cat([batch[key] for batch in group_batches], dim=1)
-        for key in ("input_ids", "position_ids", "labels", "loss_mask")
-    }
-    merged["attention_mask"] = None
-
-    for key in ("cu_seqlens_q", "cu_seqlens_kv", "cu_seqlens_q_padded", "cu_seqlens_kv_padded"):
-        fallback_key = key.removesuffix("_padded")
-        if key.endswith("_padded") and not any(key in batch for batch in group_batches):
-            continue
-        boundaries = []
-        offset = 0
-        for batch in group_batches:
-            cu_seqlens = batch.get(key, batch[fallback_key])
-            boundaries.append(cu_seqlens[:-1] + offset)
-            offset += int(cu_seqlens[-1].item())
-        merged[key] = torch.cat(
-            [*boundaries, torch.tensor([offset], dtype=cu_seqlens.dtype, device=cu_seqlens.device)]
-        )
-
+def merge_qwen_vl_visual_inputs(
+    visual_value_batches: list[Mapping[str, torch.Tensor]],
+) -> GenericVisualInputs:
+    """Merge Qwen processor payloads in their packed-token order."""
     visual_values: dict[str, list[torch.Tensor]] = {key: [] for key in QWEN_VISUAL_KEYS}
-    for batch in group_batches:
-        visual_inputs = batch["visual_inputs"]
-        for key in QWEN_VISUAL_KEYS:
-            value = getattr(visual_inputs, key)
+    for visual_value_batch in visual_value_batches:
+        for key, value in visual_value_batch.items():
+            if key not in visual_values:
+                continue
             if value is not None:
                 visual_values[key].append(value)
-    merged["visual_inputs"] = GenericVisualInputs(
-        **{key: torch.cat(values, dim=0) for key, values in visual_values.items() if values}
+    return GenericVisualInputs(**{key: torch.cat(values, dim=0) for key, values in visual_values.items() if values})
+
+
+def merge_qwen_vl_packed_batches(packed_batches: list[dict[str, Any]]) -> dict[str, Any]:
+    """Merge completed Qwen THD bins and their processor-owned payloads."""
+    merged = merge_mcore_thd_sequence_batches(packed_batches)
+    merged["visual_inputs"] = merge_qwen_vl_visual_inputs(
+        [batch["visual_inputs"].as_model_kwargs() for batch in packed_batches]
     )
-    merged["pad_between_seqs"] = any(bool(batch["pad_between_seqs"]) for batch in group_batches)
-    merged["max_seqlen_q"] = torch.stack([batch["max_seqlen_q"] for batch in group_batches]).max()
-    merged["max_seqlen_kv"] = torch.stack([batch["max_seqlen_kv"] for batch in group_batches]).max()
-    merged["total_tokens"] = sum(total_tokens)
     return merged
 
 

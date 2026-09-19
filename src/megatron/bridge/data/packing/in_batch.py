@@ -242,6 +242,70 @@ def build_mcore_thd_sequence_batch_from_rows(
     return packed
 
 
+def merge_mcore_thd_sequence_batches(
+    batches: Sequence[Mapping[str, Any]],
+    *,
+    token_key: str = "input_ids",
+) -> dict[str, Any]:
+    """Concatenate independently packed MCore THD batches.
+
+    Each input batch represents one logical packing bin. The returned batch
+    retains every input bin's logical and physical sequence boundaries, so
+    callers may use this after a loader has selected multiple packed samples
+    for one micro-batch. Model-specific payloads are intentionally excluded
+    and must be merged by their owning task encoder or collator.
+    """
+    if not batches:
+        raise ValueError("Cannot merge an empty list of packed THD batches.")
+
+    sequence_keys = (token_key, "position_ids", "labels", "loss_mask", "padding_mask")
+    merged: dict[str, Any] = {}
+    for key in sequence_keys:
+        values = [batch.get(key) for batch in batches]
+        if all(value is None for value in values):
+            continue
+        if any(not isinstance(value, torch.Tensor) for value in values):
+            raise ValueError(f"Packed THD batches must either all provide '{key}' or all omit it.")
+        if any(value.dim() != 2 or value.size(0) != 1 for value in values):
+            raise ValueError(f"Packed THD '{key}' tensors must have shape [1, total_tokens].")
+        merged[key] = torch.cat(values, dim=1)
+
+    if token_key not in merged or "position_ids" not in merged:
+        raise ValueError(f"Packed THD batches require '{token_key}' and 'position_ids' tensors.")
+    if any(batch.get("attention_mask") is not None for batch in batches):
+        raise ValueError("Packed THD batches require attention_mask=None.")
+    merged["attention_mask"] = None
+
+    for key in ("cu_seqlens_q", "cu_seqlens_kv", "cu_seqlens_q_padded", "cu_seqlens_kv_padded"):
+        fallback_key = key.removesuffix("_padded")
+        if key.endswith("_padded") and not any(key in batch for batch in batches):
+            continue
+        boundaries: list[torch.Tensor] = []
+        offset = 0
+        for batch in batches:
+            cu_seqlens = batch.get(key, batch.get(fallback_key))
+            if not isinstance(cu_seqlens, torch.Tensor) or cu_seqlens.dim() != 1 or cu_seqlens.numel() < 2:
+                raise ValueError(f"Packed THD batches require 1D '{fallback_key}' metadata.")
+            boundaries.append(cu_seqlens[:-1] + offset)
+            offset += int(cu_seqlens[-1].item())
+        merged[key] = torch.cat(
+            [*boundaries, torch.tensor([offset], dtype=cu_seqlens.dtype, device=cu_seqlens.device)]
+        )
+
+    for key in ("max_seqlen_q", "max_seqlen_kv"):
+        values = [batch.get(key) for batch in batches]
+        if any(not isinstance(value, torch.Tensor) or value.numel() != 1 for value in values):
+            raise ValueError(f"Packed THD batches require scalar '{key}' metadata.")
+        merged[key] = torch.stack(values).max()
+
+    total_tokens = sum(int(batch.get("total_tokens", -1)) for batch in batches)
+    if total_tokens != merged[token_key].size(1):
+        raise ValueError("Packed THD total_tokens must equal the merged physical token length.")
+    merged["total_tokens"] = total_tokens
+    merged["pad_between_seqs"] = any(bool(batch.get("pad_between_seqs", False)) for batch in batches)
+    return merged
+
+
 def pack_right_padded_sequence_batch_to_mcore_thd(
     batch: MutableMapping[str, Any],
     *,

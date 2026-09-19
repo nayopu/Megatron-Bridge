@@ -41,7 +41,8 @@ from megatron.bridge.data.energon.task_encoder_utils import (
 from megatron.bridge.data.packing.algorithms import first_fit_decreasing
 from megatron.bridge.models.qwen_vl.data.collate_fn import (
     QwenVLPreparedSequence,
-    build_qwen_vl_packed_batch_from_groups,
+    build_qwen_vl_packed_batch,
+    merge_qwen_vl_packed_batches,
     prepare_qwen_vl_sequence,
     qwen2_5_collate_fn,
 )
@@ -487,14 +488,16 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
                     raise ValueError(
                         f"Packed Qwen-VL group length {packed_length} exceeds seq_length={self.seq_length}."
                     )
-            collated = build_qwen_vl_packed_batch_from_groups(
+            collated = merge_qwen_vl_packed_batches(
                 [
-                    [sample.prepared_sequence for sample in group if sample.prepared_sequence is not None]
+                    build_qwen_vl_packed_batch(
+                        [sample.prepared_sequence for sample in group if sample.prepared_sequence is not None],
+                        sequence_length=self.seq_length,
+                        pad_to_multiple_of=self.in_batch_packing_pad_to_multiple_of,
+                        pad_to_max_length=self.pad_to_max_length,
+                    )
                     for group in packed_groups
-                ],
-                sequence_length=self.seq_length,
-                pad_to_multiple_of=self.in_batch_packing_pad_to_multiple_of,
-                pad_to_max_length=self.pad_to_max_length,
+                ]
             )
         else:
             if not all(isinstance(sample, QwenVLTaskSample) for sample in samples):
