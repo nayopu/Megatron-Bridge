@@ -41,8 +41,7 @@ from megatron.bridge.data.energon.task_encoder_utils import (
 from megatron.bridge.data.packing.algorithms import first_fit_decreasing
 from megatron.bridge.models.qwen_vl.data.collate_fn import (
     QwenVLPreparedSequence,
-    build_qwen_vl_packed_batch,
-    merge_qwen_vl_packed_batches,
+    build_qwen_vl_packed_batch_from_groups,
     prepare_qwen_vl_sequence,
     qwen2_5_collate_fn,
 )
@@ -470,10 +469,7 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
             be padded to ``seq_length`` while retaining separate real and
             physical THD boundaries.
         """
-        is_native_packed = bool(samples) and isinstance(samples[0], QwenVLPackedTaskSample)
-        if is_native_packed:
-            if not all(isinstance(sample, QwenVLPackedTaskSample) for sample in samples):
-                raise TypeError("Qwen-VL batches cannot mix packed and unpacked Energon samples.")
+        if samples and all(isinstance(sample, QwenVLPackedTaskSample) for sample in samples):
             packed_groups = [packed_sample.samples for packed_sample in samples]
             source_samples = [sample for group in packed_groups for sample in group]
             if any(sample.prepared_sequence is None for sample in source_samples):
@@ -488,28 +484,27 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
                     raise ValueError(
                         f"Packed Qwen-VL group length {packed_length} exceeds seq_length={self.seq_length}."
                     )
-            collated = merge_qwen_vl_packed_batches(
+            collated = build_qwen_vl_packed_batch_from_groups(
                 [
-                    build_qwen_vl_packed_batch(
-                        [sample.prepared_sequence for sample in group if sample.prepared_sequence is not None],
-                        sequence_length=self.seq_length,
-                        pad_to_multiple_of=self.in_batch_packing_pad_to_multiple_of,
-                        pad_to_max_length=self.pad_to_max_length,
-                    )
+                    [sample.prepared_sequence for sample in group if sample.prepared_sequence is not None]
                     for group in packed_groups
-                ]
+                ],
+                sequence_length=self.seq_length,
+                pad_to_multiple_of=self.in_batch_packing_pad_to_multiple_of,
+                pad_to_max_length=self.pad_to_max_length,
             )
         else:
-            if not all(isinstance(sample, QwenVLTaskSample) for sample in samples):
+            if any(isinstance(sample, QwenVLPackedTaskSample) for sample in samples) or not all(
+                isinstance(sample, QwenVLTaskSample) for sample in samples
+            ):
                 raise TypeError("Qwen-VL batches cannot mix packed and unpacked Energon samples.")
             source_samples = samples
             if any(sample.example is None for sample in source_samples):
                 raise ValueError("Unpacked Qwen-VL samples must retain their normalized examples.")
             examples = [sample.example for sample in source_samples if sample.example is not None]
             collated = self.collate_fn(examples)
-
-        if not is_native_packed and collated["input_ids"].shape[1] > self.seq_len:
-            logging.warning("max sequence length larger than passed parameter")
+            if collated["input_ids"].shape[1] > self.seq_len:
+                logging.warning("max sequence length larger than passed parameter")
 
         keys = [sample.__key__ for sample in source_samples]
         return QwenVLTaskBatch(
