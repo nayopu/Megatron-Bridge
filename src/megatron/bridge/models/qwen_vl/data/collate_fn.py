@@ -276,6 +276,70 @@ def build_qwen_vl_packed_batch(
     return packed_batch
 
 
+def build_qwen_vl_packed_batch_from_bins(
+    sequence_bins: list[list[QwenVLPreparedSequence]],
+    *,
+    sequence_length: int,
+    pad_to_multiple_of: int,
+    pad_to_max_length: bool = False,
+) -> dict[str, Any]:
+    """Build one THD row from independently selected native-packing bins.
+
+    Each bin is constrained and, when requested, final-padded to
+    ``sequence_length`` before all bins are flattened into one physical row.
+    A single bin is the ``micro_batch_size=1`` form of the same operation.
+    """
+    if not sequence_bins or any(not sequence_bin for sequence_bin in sequence_bins):
+        raise ValueError("Native packed Qwen-VL batches require non-empty sequence bins.")
+
+    bin_batches = [
+        build_qwen_vl_packed_batch(
+            sequence_bin,
+            sequence_length=sequence_length,
+            pad_to_multiple_of=pad_to_multiple_of,
+            pad_to_max_length=pad_to_max_length,
+        )
+        for sequence_bin in sequence_bins
+    ]
+
+    total_tokens = [int(batch["total_tokens"]) for batch in bin_batches]
+    merged: dict[str, Any] = {
+        key: torch.cat([batch[key] for batch in bin_batches], dim=1)
+        for key in ("input_ids", "position_ids", "labels", "loss_mask")
+    }
+    merged["attention_mask"] = None
+
+    for key in ("cu_seqlens_q", "cu_seqlens_kv", "cu_seqlens_q_padded", "cu_seqlens_kv_padded"):
+        fallback_key = key.removesuffix("_padded")
+        if key.endswith("_padded") and not any(key in batch for batch in bin_batches):
+            continue
+        boundaries = []
+        offset = 0
+        for batch in bin_batches:
+            cu_seqlens = batch.get(key, batch[fallback_key])
+            boundaries.append(cu_seqlens[:-1] + offset)
+            offset += int(cu_seqlens[-1].item())
+        merged[key] = torch.cat(
+            [*boundaries, torch.tensor([offset], dtype=cu_seqlens.dtype, device=cu_seqlens.device)]
+        )
+
+    visual_values: dict[str, list[torch.Tensor]] = {key: [] for key in QWEN_VISUAL_KEYS}
+    for batch in bin_batches:
+        visual_inputs = batch["visual_inputs"]
+        for key in QWEN_VISUAL_KEYS:
+            value = getattr(visual_inputs, key)
+            if value is not None:
+                visual_values[key].append(value)
+    merged["visual_inputs"] = GenericVisualInputs(
+        **{key: torch.cat(values, dim=0) for key, values in visual_values.items() if values}
+    )
+    merged["pad_between_seqs"] = any(bool(batch["pad_between_seqs"]) for batch in bin_batches)
+    merged["max_seqlen_q"] = torch.stack([batch["max_seqlen_q"] for batch in bin_batches]).max()
+    merged["max_seqlen_kv"] = torch.stack([batch["max_seqlen_kv"] for batch in bin_batches]).max()
+    merged["total_tokens"] = sum(total_tokens)
+    return merged
+
+
 def qwen2_5_collate_fn(
     examples: list,
     processor,

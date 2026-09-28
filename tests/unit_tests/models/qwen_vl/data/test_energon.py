@@ -465,11 +465,46 @@ class TestQwenVLTaskEncoderNativePacking(unittest.TestCase):
         self.assertTrue(torch.equal(batch.labels[0, 4:], torch.full((8,), -100)))
         self.assertTrue(torch.equal(batch.loss_mask[0, 4:], torch.zeros(8)))
 
-    def test_batch_rejects_malformed_overlength_packed_group(self):
+    def test_native_pack_flattens_each_micro_batch_slot(self):
+        first_pack = self.encoder.pack_selected_samples([self._sample("five", 5, 5), self._sample("four", 4, 4)])
+        second_pack = self.encoder.pack_selected_samples([self._sample("three", 3, 3)])
+
+        variable_batch = self.encoder.batch([first_pack, second_pack])
+
+        self.assertEqual(variable_batch.input_ids.shape, (1, 16))
+        self.assertEqual(variable_batch.cu_seqlens_q.tolist(), [0, 5, 9, 12])
+        self.assertEqual(variable_batch.cu_seqlens_q_padded.tolist(), [0, 8, 12, 16])
+        self.assertEqual(variable_batch.total_tokens, 16)
+
+        self.encoder.pad_to_max_length = True
+        batch = self.encoder.batch([first_pack, second_pack])
+
+        self.assertEqual(batch.__keys__, ["five", "four", "three"])
+        self.assertEqual(batch.input_ids.shape, (1, 24))
+        self.assertEqual(batch.cu_seqlens_q.tolist(), [0, 5, 9, 12])
+        self.assertEqual(batch.cu_seqlens_q_padded.tolist(), [0, 8, 12, 24])
+        self.assertEqual(batch.max_seqlen_q.item(), 12)
+        self.assertEqual(batch.total_tokens, 24)
+        self.assertTrue(torch.equal(batch.labels[0, 15:24], torch.full((9,), -100)))
+        self.assertTrue(torch.equal(batch.loss_mask[0, 15:24], torch.zeros(9)))
+        self.assertEqual(batch.visual_inputs.pixel_values[:, 0].tolist(), [5.0, 4.0, 3.0])
+
+    def test_native_pack_merges_aligned_slot_without_physical_metadata(self):
+        first_pack = self.encoder.pack_selected_samples([self._sample("five", 5, 5)])
+        second_pack = self.encoder.pack_selected_samples([self._sample("four", 4, 4)])
+
+        batch = self.encoder.batch([first_pack, second_pack])
+
+        self.assertEqual(batch.input_ids.shape, (1, 12))
+        self.assertEqual(batch.cu_seqlens_q.tolist(), [0, 5, 9])
+        self.assertEqual(batch.cu_seqlens_q_padded.tolist(), [0, 8, 12])
+        self.assertEqual(batch.total_tokens, 12)
+
+    def test_batch_rejects_malformed_overlength_packed_bin(self):
         source_samples = [self._sample("nine-a", 9, 9), self._sample("nine-b", 9, 9)]
         packed_sample = self.encoder.pack_selected_samples(source_samples)
 
-        with self.assertRaisesRegex(ValueError, "group length 24 exceeds seq_length=12"):
+        with self.assertRaisesRegex(ValueError, "bin length 24 exceeds seq_length=12"):
             self.encoder.batch([packed_sample])
 
     def test_encode_sample_preserves_restore_key_without_buffering_raw_media(self):

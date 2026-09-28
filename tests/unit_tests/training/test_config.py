@@ -209,12 +209,14 @@ def create_test_energon_dataset_config(sequence_length: int, micro_batch_size: i
     )
 
 
-def create_test_qwen_native_energon_dataset_config(sequence_length: int) -> EnergonDatasetConfig:
+def create_test_qwen_native_energon_dataset_config(
+    sequence_length: int, micro_batch_size: int = 1
+) -> EnergonDatasetConfig:
     """Create an Energon config using Qwen-VL native online packing."""
     return EnergonDatasetConfig(
         path="/tmp/energon",
         seq_length=sequence_length,
-        micro_batch_size=1,
+        micro_batch_size=micro_batch_size,
         packing_buffer_size=32,
         task_encoder=QwenVLEnergonTaskEncoderConfig(hf_processor_path="Qwen/model"),
     )
@@ -1490,15 +1492,15 @@ class TestConfigContainerValidation:
             restore_get_world_size_safe(og_ws, cfg_mod)
 
     def test_native_energon_packing_sets_variable_sequences_and_cp_sp_alignment(self, monkeypatch):
-        """Native Energon packing uses MBS1 while deriving the same THD alignment."""
+        """Native Energon packing derives THD alignment for every packed micro-batch slot."""
         model_cfg = create_test_qwen3_vl_config(
             context_parallel_size=2,
             tensor_model_parallel_size=4,
             sequence_parallel=True,
             calculate_per_token_loss=True,
         )
-        train_cfg = create_test_training_config(micro_batch_size=1, global_batch_size=8)
-        dataset_cfg = create_test_qwen_native_energon_dataset_config(sequence_length=512)
+        train_cfg = create_test_training_config(micro_batch_size=2, global_batch_size=8)
+        dataset_cfg = create_test_qwen_native_energon_dataset_config(sequence_length=512, micro_batch_size=2)
         container, og_ws, cfg_mod = create_test_config_container(
             world_size_override=8,
             model_config=model_cfg,

@@ -160,7 +160,12 @@ EnergonTaskEncoderConfig = (
 
 @dataclass(kw_only=True)
 class EnergonDatasetConfig(DataloaderConfig):
-    """Serializable configuration for an Energon-backed multimodal dataset."""
+    """Serializable configuration for an Energon-backed multimodal dataset.
+
+    With ``packing_buffer_size`` set, each micro-batch slot contains one
+    independently selected native-packing bin. The task encoder flattens all
+    slots into one THD row while retaining their logical sequence boundaries.
+    """
 
     path: str | None = None
     seq_length: int
@@ -208,8 +213,6 @@ class EnergonDatasetConfig(DataloaderConfig):
                 "Energon native sequence packing is incompatible with defer_in_batch_packing_to_step=True; "
                 "use the canonical vlm_step path."
             )
-        if self.packing_buffer_size is not None and self.micro_batch_size != 1:
-            raise ValueError("Energon native sequence packing requires micro_batch_size=1.")
         if self.pad_to_multiple_of <= 0:
             raise ValueError("pad_to_multiple_of must be greater than 0.")
         if self.in_batch_packing_pad_to_multiple_of <= 0:
