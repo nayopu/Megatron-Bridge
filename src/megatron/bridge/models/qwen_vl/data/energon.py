@@ -41,7 +41,7 @@ from megatron.bridge.data.energon.task_encoder_utils import (
 from megatron.bridge.data.packing.algorithms import first_fit_decreasing
 from megatron.bridge.models.qwen_vl.data.collate_fn import (
     QwenVLPreparedSequence,
-    build_qwen_vl_packed_batch_from_groups,
+    build_qwen_vl_packed_batch_from_bins,
     prepare_qwen_vl_sequence,
     qwen2_5_collate_fn,
 )
@@ -150,7 +150,7 @@ class QwenVLTaskSample:
 
 @dataclass
 class QwenVLPackedTaskSample:
-    """One Energon-selected group of prepared Qwen-VL samples."""
+    """One Energon-selected packing bin of prepared Qwen-VL samples."""
 
     __key__: str
     __restore_key__: tuple[Any, ...]
@@ -418,9 +418,9 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
 
     @stateless
     def pack_selected_samples(self, samples: List[QwenVLTaskSample]) -> QwenVLPackedTaskSample:
-        """Wrap one selected group; Energon assigns its restore key afterwards."""
+        """Wrap one selected packing bin; Energon assigns its restore key afterwards."""
         if not samples:
-            raise ValueError("Cannot pack an empty Qwen-VL sample group.")
+            raise ValueError("Cannot pack an empty Qwen-VL sample bin.")
         return QwenVLPackedTaskSample(
             __key__=",".join(sample.__key__ for sample in samples),
             __restore_key__=(),
@@ -460,7 +460,7 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
 
         Expected input format:
             Either normalized ``QwenVLTaskSample`` objects whose ``example``
-            fields follow the HF VLM collate schema, or packed sample groups
+            fields follow the HF VLM collate schema, or packed sample bins
             selected by Energon native packing.
 
         Output format:
@@ -470,24 +470,24 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
             physical THD boundaries.
         """
         if samples and all(isinstance(sample, QwenVLPackedTaskSample) for sample in samples):
-            packed_groups = [packed_sample.samples for packed_sample in samples]
-            source_samples = [sample for group in packed_groups for sample in group]
+            packed_bins = [packed_sample.samples for packed_sample in samples]
+            source_samples = [sample for sample_bin in packed_bins for sample in sample_bin]
             if any(sample.prepared_sequence is None for sample in source_samples):
                 raise ValueError("Packed Qwen-VL samples must contain prepared sequences.")
-            for group in packed_groups:
+            for sample_bin in packed_bins:
                 packed_length = sum(
                     _aligned_sequence_length(sample.prepared_sequence, self.in_batch_packing_pad_to_multiple_of)
-                    for sample in group
+                    for sample in sample_bin
                     if sample.prepared_sequence is not None
                 )
                 if packed_length > self.seq_length:
                     raise ValueError(
-                        f"Packed Qwen-VL group length {packed_length} exceeds seq_length={self.seq_length}."
+                        f"Packed Qwen-VL bin length {packed_length} exceeds seq_length={self.seq_length}."
                     )
-            collated = build_qwen_vl_packed_batch_from_groups(
+            collated = build_qwen_vl_packed_batch_from_bins(
                 [
-                    [sample.prepared_sequence for sample in group if sample.prepared_sequence is not None]
-                    for group in packed_groups
+                    [sample.prepared_sequence for sample in sample_bin if sample.prepared_sequence is not None]
+                    for sample_bin in packed_bins
                 ],
                 sequence_length=self.seq_length,
                 pad_to_multiple_of=self.in_batch_packing_pad_to_multiple_of,

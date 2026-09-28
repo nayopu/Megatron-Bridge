@@ -500,11 +500,11 @@ class TestQwenVLTaskEncoderNativePacking(unittest.TestCase):
         self.assertEqual(batch.cu_seqlens_q_padded.tolist(), [0, 8, 12])
         self.assertEqual(batch.total_tokens, 12)
 
-    def test_batch_rejects_malformed_overlength_packed_group(self):
+    def test_batch_rejects_malformed_overlength_packed_bin(self):
         source_samples = [self._sample("nine-a", 9, 9), self._sample("nine-b", 9, 9)]
         packed_sample = self.encoder.pack_selected_samples(source_samples)
 
-        with self.assertRaisesRegex(ValueError, "group length 24 exceeds seq_length=12"):
+        with self.assertRaisesRegex(ValueError, "bin length 24 exceeds seq_length=12"):
             self.encoder.batch([packed_sample])
 
     def test_encode_sample_preserves_restore_key_without_buffering_raw_media(self):
